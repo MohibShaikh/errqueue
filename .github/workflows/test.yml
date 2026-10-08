@@ -21,3 +21,10 @@ jobs:
       - run: sudo netns/setup.sh
       - run: go test -c -o errqueue.test .
       - run: sudo ERRQUEUE_NETNS=1 ./errqueue.test -test.run Router -test.v -test.count=1
+      - name: Router state
+        if: failure()
+        run: |
+          ip route get 10.0.9.1
+          sudo ip -n eqr route
+          sudo ip netns exec eqr sysctl -a 2>/dev/null | grep -E 'ipv4\.(ip_forward|icmp_|conf\.(all|c1)\.(forwarding|rp_filter))'
+          sudo ip netns exec eqr nstat -az | grep -Ei 'icmp|noroute|addrerr|forw'
