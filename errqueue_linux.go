@@ -6,13 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strconv"
 	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
 const (
-	payloadMax = 2048 // ICMP quotes at most 576 (IPv4) or 1280 (IPv6) bytes in total
+	payloadMax = 2048 // longer quotes are cut and reported as Truncated
 	oobMax     = 512  // room for the error and any other control messages enabled on the socket
 	eeLen      = 16   // struct sock_extended_err
 )
@@ -21,6 +22,23 @@ var (
 	errNoRecvErr = errors.New("errqueue: entry has no IP_RECVERR control message")
 	errShort     = errors.New("errqueue: short sock_extended_err")
 )
+
+// icmpErrnos are the errnos Linux turns ICMP and ICMPv6 errors into
+// (net/ipv4/icmp.c icmp_err_convert, net/ipv4/udp.c __udp4_lib_err,
+// net/ipv6/icmp.c icmpv6_err_convert). Only these can reach a send as the
+// pending error of an earlier datagram.
+var icmpErrnos = map[syscall.Errno]bool{
+	syscall.ENETUNREACH:  true,
+	syscall.EHOSTUNREACH: true,
+	syscall.ENOPROTOOPT:  true,
+	syscall.ECONNREFUSED: true,
+	syscall.EMSGSIZE:     true,
+	syscall.EOPNOTSUPP:   true,
+	syscall.EHOSTDOWN:    true,
+	syscall.ENONET:       true,
+	syscall.EPROTO:       true,
+	syscall.EACCES:       true,
+}
 
 // Enable turns on the error queue for conn. An IPv6 socket gets both IPV6_RECVERR
 // and IP_RECVERR: a dual-stack socket queues errors for its IPv4 traffic only
@@ -52,18 +70,24 @@ func Enable(conn syscall.Conn) error {
 	return serr
 }
 
-// Drain reads the error queue until it is empty, without blocking, and calls fn
+// Drain reads the error queue until it is empty, without blocking, then calls fn
 // for each entry. It always reads to the end: reading part of the queue re-arms
 // the socket's pending error, which then fails the next send or read.
 //
 // n counts the entries read. An entry that cannot be parsed is skipped, and its
-// error is returned once the queue is empty.
+// error is returned.
+//
+// Drain consumes every entry, including SO_TIMESTAMPING and zero-copy
+// notifications, which Event does not fully represent. Give each socket one
+// owner that drains it: while one goroutine drains, another goroutine's read or
+// send can take the re-armed pending error and then find the queue empty.
 func Drain(conn syscall.Conn, fn func(Event)) (n int, err error) {
 	rc, err := conn.SyscallConn()
 	if err != nil {
 		return 0, err
 	}
 	data, oob := make([]byte, payloadMax), make([]byte, oobMax)
+	var evs []Event
 	var errs []error
 	err = rc.Control(func(fd uintptr) {
 		for {
@@ -83,37 +107,55 @@ func Drain(conn syscall.Conn, fn func(Event)) (n int, err error) {
 				errs = append(errs, perr)
 				continue
 			}
-			if fn != nil {
-				fn(ev)
-			}
+			evs = append(evs, ev)
 		}
 	})
+	// Callbacks run after Control returns: Control holds a reference on the
+	// descriptor, and a callback that closes conn would wait for it forever.
+	if fn != nil {
+		for _, ev := range evs {
+			fn(ev)
+		}
+	}
 	return n, errors.Join(append(errs, err)...)
 }
 
-// Send calls send and, if it fails because an earlier datagram's error was
-// reported on it, drains the queue and calls send once more. With the queue
-// enabled the kernel fails the first send after an ICMP error arrives and does
-// not send its datagram. Entries drained on the way are passed to fn.
+// Send calls send and, if it failed with an error an ICMP message could have
+// caused, drains the queue and calls send once more. With the queue enabled the
+// kernel fails the first send after an ICMP error arrives, whatever its
+// destination, and does not send that datagram. Entries drained on the way are
+// passed to fn.
 //
-// send is not retried when the queue was empty or held a local error: then the
-// failure is this send's own.
+// send must send at most one datagram per call. An EMSGSIZE is retried only when
+// the queue held an ICMP packet-too-big; otherwise it is this send's own refusal.
+//
+// A nil error means the datagram was sent. A *DrainError means it was sent but
+// reading the queue failed; do not send it again.
 func Send(conn syscall.Conn, send func() error, fn func(Event)) error {
 	err := send()
-	if err == nil {
-		return nil
+	var errno syscall.Errno
+	if err == nil || !errors.As(err, &errno) || !icmpErrnos[errno] {
+		return err
 	}
-	local := false
-	n, derr := Drain(conn, func(e Event) {
-		local = local || e.Origin == OriginLocal
+	retry := errno != syscall.EMSGSIZE
+	_, derr := Drain(conn, func(e Event) {
+		if e.Err == syscall.EMSGSIZE && e.Origin != OriginLocal {
+			retry = true
+		}
 		if fn != nil {
 			fn(e)
 		}
 	})
-	if n == 0 || local {
+	if !retry {
 		return errors.Join(err, derr)
 	}
-	return send()
+	if err := send(); err != nil {
+		return errors.Join(err, derr)
+	}
+	if derr != nil {
+		return &DrainError{Err: derr}
+	}
+	return nil
 }
 
 func parse(data, oob []byte, flags int, from unix.Sockaddr) (Event, error) {
@@ -130,15 +172,16 @@ func parse(data, oob []byte, flags int, from unix.Sockaddr) (Event, error) {
 			return Event{}, errShort
 		}
 		return Event{
-			Err:       syscall.Errno(binary.NativeEndian.Uint32(m.Data[0:4])),
-			Origin:    Origin(m.Data[4]),
-			Type:      m.Data[5],
-			Code:      m.Data[6],
-			Info:      binary.NativeEndian.Uint32(m.Data[8:12]),
-			Offender:  offender(m.Data[eeLen:]),
-			Dest:      addrPort(from),
-			Payload:   bytes.Clone(data),
-			Truncated: flags&unix.MSG_TRUNC != 0,
+			Err:              syscall.Errno(binary.NativeEndian.Uint32(m.Data[0:4])),
+			Origin:           Origin(m.Data[4]),
+			Type:             m.Data[5],
+			Code:             m.Data[6],
+			Info:             binary.NativeEndian.Uint32(m.Data[8:12]),
+			Offender:         offender(m.Data[eeLen:]),
+			Dest:             addrPort(from),
+			Payload:          bytes.Clone(data),
+			Truncated:        flags&unix.MSG_TRUNC != 0,
+			ControlTruncated: flags&unix.MSG_CTRUNC != 0,
 		}, nil
 	}
 	if flags&unix.MSG_CTRUNC != 0 {
@@ -160,7 +203,11 @@ func offender(b []byte) netip.Addr {
 		}
 	case unix.AF_INET6:
 		if len(b) >= 24 {
-			return netip.AddrFrom16([16]byte(b[8:24])).Unmap()
+			a := netip.AddrFrom16([16]byte(b[8:24])).Unmap()
+			if len(b) >= unix.SizeofSockaddrInet6 {
+				a = withZone(a, binary.NativeEndian.Uint32(b[24:28]))
+			}
+			return a
 		}
 	}
 	return netip.Addr{}
@@ -171,7 +218,15 @@ func addrPort(sa unix.Sockaddr) netip.AddrPort {
 	case *unix.SockaddrInet4:
 		return netip.AddrPortFrom(netip.AddrFrom4(sa.Addr), uint16(sa.Port))
 	case *unix.SockaddrInet6:
-		return netip.AddrPortFrom(netip.AddrFrom16(sa.Addr).Unmap(), uint16(sa.Port))
+		return netip.AddrPortFrom(withZone(netip.AddrFrom16(sa.Addr).Unmap(), sa.ZoneId), uint16(sa.Port))
 	}
 	return netip.AddrPort{}
+}
+
+// withZone keeps an IPv6 scope ID as a numeric zone, which net.UDPAddr accepts.
+func withZone(a netip.Addr, scope uint32) netip.Addr {
+	if scope == 0 || !a.Is6() {
+		return a
+	}
+	return a.WithZone(strconv.FormatUint(uint64(scope), 10))
 }

@@ -6,7 +6,7 @@
 // returns ECONNREFUSED or EHOSTUNREACH without data, and a send fails without
 // sending its datagram, whatever its destination. Call Drain when a read fails,
 // and send through Send, so these reports are consumed instead of treated as
-// failures.
+// failures. Give each socket one goroutine that drains it.
 //
 // On other systems Enable and Drain return errors.ErrUnsupported and Send only
 // calls the send function.
@@ -54,7 +54,21 @@ type Event struct {
 	Dest      netip.AddrPort // where the original datagram was going
 	Payload   []byte         // the start of the original datagram's payload
 	Truncated bool           // the kernel quoted more payload than was read
+
+	// ControlTruncated reports that the kernel had more control data than fit,
+	// so Offender may be missing.
+	ControlTruncated bool
 }
+
+// A DrainError is returned by Send when the datagram was sent but reading the
+// error queue failed. The datagram must not be sent again.
+type DrainError struct{ Err error }
+
+func (e *DrainError) Error() string {
+	return "errqueue: datagram sent, but reading the error queue failed: " + e.Err.Error()
+}
+
+func (e *DrainError) Unwrap() error { return e.Err }
 
 // MTU returns the path MTU carried by a "packet too big" error: ICMP
 // fragmentation needed, ICMPv6 packet too big, or a local EMSGSIZE.

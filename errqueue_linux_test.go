@@ -59,7 +59,11 @@ func closedAddr(t *testing.T, network, ip string) *net.UDPAddr {
 func waitErr(t *testing.T, c syscall.Conn) {
 	t.Helper()
 	control(t, c, func(fd int) error {
-		_, err := unix.Poll([]unix.PollFd{{Fd: int32(fd)}}, 1000)
+		p := []unix.PollFd{{Fd: int32(fd)}}
+		n, err := unix.Poll(p, 1000)
+		if err == nil && (n == 0 || p[0].Revents&unix.POLLERR == 0) {
+			err = errors.New("no error queued within 1s")
+		}
 		return err
 	})
 }
@@ -363,5 +367,136 @@ func TestRawConnReadWaitsForErrQueue(t *testing.T) {
 	}
 	if r.attempt != 2 {
 		t.Errorf("want 2 attempts (EAGAIN, then the entry), got %d", r.attempt)
+	}
+}
+
+// Regressions found in the v0.1.0 audit.
+
+// A callback that closes the socket used to wait forever: callbacks ran inside
+// RawConn.Control, which holds the reference Close waits for.
+func TestDrainCallbackCanClose(t *testing.T) {
+	c := enabled(t, "udp4", "127.0.0.1")
+	queueErrors(t, c, 1)
+	done := make(chan error, 1)
+	go func() {
+		_, err := Drain(c, func(Event) { done <- c.Close() })
+		if err != nil {
+			done <- err
+		}
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close inside the Drain callback did not return")
+	}
+}
+
+// An earlier oversized send leaves a local entry queued. It used to stop Send
+// retrying a later send that an ICMP error failed, so that datagram was lost.
+func TestSendRetriesPastStaleLocalEntry(t *testing.T) {
+	peer := listen(t, "udp6", "::1")
+	addr := peer.LocalAddr().(*net.UDPAddr)
+	c, err := net.DialUDP("udp6", nil, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := Enable(c); err != nil {
+		t.Fatal(err)
+	}
+	control(t, c, func(fd int) error {
+		return errors.Join(unix.SetsockoptInt(fd, unix.SOL_IPV6, unix.IPV6_DONTFRAG, 1),
+			unix.SetsockoptInt(fd, unix.SOL_IPV6, unix.IPV6_MTU, 1280))
+	})
+	if _, err := c.Write(make([]byte, 1400)); !errors.Is(err, syscall.EMSGSIZE) {
+		t.Fatalf("oversized write: %v", err)
+	}
+	peer.Close()
+	if _, err := c.Write([]byte("x")); err != nil { // to the closed port: queues an ICMP6 error
+		t.Fatal(err)
+	}
+	waitErr(t, c)
+	time.Sleep(30 * time.Millisecond)
+	alive, err := net.ListenUDP("udp6", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer alive.Close()
+	var origins []Origin
+	err = Send(c, func() error { _, err := c.Write([]byte("ok")); return err },
+		func(e Event) { origins = append(origins, e.Origin) })
+	if err != nil || received(t, alive) != 1 {
+		t.Fatalf("Send: %v, origins %v; want the datagram delivered", err, origins)
+	}
+}
+
+// A send error ICMP cannot cause is returned untouched and leaves the queue alone.
+func TestSendIgnoresNonICMPErrors(t *testing.T) {
+	c := enabled(t, "udp4", "127.0.0.1")
+	queueErrors(t, c, 1)
+	calls := 0
+	err := Send(c, func() error { calls++; return syscall.EINVAL }, nil)
+	if !errors.Is(err, syscall.EINVAL) || calls != 1 {
+		t.Fatalf("err=%v calls=%d; want EINVAL after one call", err, calls)
+	}
+	if n, _ := Drain(c, nil); n != 1 {
+		t.Fatalf("queue: %d entries, want the 1 Send left alone", n)
+	}
+}
+
+// Another goroutine drains the queue between the failed send and Send's own
+// drain. Send used to give up on an empty drain, losing the datagram.
+func TestSendRetriesWhenQueueDrainedElsewhere(t *testing.T) {
+	c, peer := enabled(t, "udp4", "127.0.0.1"), listen(t, "udp4", "127.0.0.1")
+	queueErrors(t, c, 3)
+	calls := 0
+	err := Send(c, func() error {
+		calls++
+		_, err := c.WriteToUDP([]byte("ok"), peer.LocalAddr().(*net.UDPAddr))
+		if calls == 1 {
+			if n, derr := Drain(c, nil); n != 3 || derr != nil {
+				t.Errorf("competing Drain: %d, %v", n, derr)
+			}
+		}
+		return err
+	}, nil)
+	if err != nil || calls != 2 || received(t, peer) != 1 {
+		t.Fatalf("err=%v calls=%d; want the retry delivered", err, calls)
+	}
+}
+
+type failingControl struct{ syscall.Conn }
+type failingRawConn struct{ syscall.RawConn }
+
+var errControl = errors.New("injected Control failure")
+
+func (c failingControl) SyscallConn() (syscall.RawConn, error) {
+	rc, err := c.Conn.SyscallConn()
+	return failingRawConn{rc}, err
+}
+
+func (r failingRawConn) Control(f func(uintptr)) error {
+	return errors.Join(r.RawConn.Control(f), errControl)
+}
+
+// A retry that succeeds used to drop the drain's error. It now comes back as a
+// *DrainError, which says the datagram was sent.
+func TestSendReportsDrainError(t *testing.T) {
+	c := enabled(t, "udp4", "127.0.0.1")
+	queueErrors(t, c, 1)
+	calls := 0
+	err := Send(failingControl{c}, func() error {
+		calls++
+		if calls == 1 {
+			return syscall.ECONNREFUSED
+		}
+		return nil
+	}, nil)
+	var de *DrainError
+	if !errors.As(err, &de) || !errors.Is(err, errControl) || calls != 2 {
+		t.Fatalf("err=%v calls=%d; want a *DrainError after the retry", err, calls)
 	}
 }
