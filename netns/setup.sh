@@ -28,8 +28,10 @@ ip -n eqr link set c1 up
 ip -n eqr link set s1 up
 ip -n eqr route add unreachable 10.0.9.0/24
 ip -n eqr route add unreachable fd00:9::/64
-ip netns exec eqr sysctl -qw net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1 \
-	net.ipv4.icmp_ratelimit=0 net.ipv6.icmp.ratelimit=0
+# Keep the default ICMP rate limits, which allow a burst of about five errors per
+# source. net.ipv4.icmp_ratelimit=0 empties that burst on kernels before 7.0
+# (net/ipv4/inetpeer.c:261), and the router then drops the unreachable silently.
+ip netns exec eqr sysctl -qw net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1
 
 ip -n eqs addr add 10.0.2.2/24 dev s0
 ip -n eqs addr add fd00:2::2/64 dev s0 nodad
