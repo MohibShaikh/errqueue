@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds a router between this namespace and a server namespace, for the tests
-# in netns_linux_test.go. Needs root. The router's link to the server has an MTU
+# in router_linux_test.go. Needs root. The router's link to the server has an MTU
 # of 1300, and it has unreachable routes for 10.0.9.0/24 and fd00:9::/64.
 #
 #   this ns  veth c0 ---- c1 [router "eqr"] s1 ---- s0 [server "eqs"]
