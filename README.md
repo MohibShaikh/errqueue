@@ -75,7 +75,7 @@ The tests run against real sockets on loopback. On Linux 7.0.0-38-generic x86_64
 
 Loopback can't produce ICMP from a router, so `router_linux_test.go` uses a real one: `netns/setup.sh` puts a Linux router in a network namespace, with a 1300-byte link behind it and unreachable routes. These tests need root and run in CI. They cover time exceeded (IPv4, IPv6, dual-stack), unreachable routes, and "packet too big" from the router followed by the local `EMSGSIZE` the kernel then raises itself, for IPv4 and IPv6. The router quoted 520 payload bytes for IPv4 and 1184 for IPv6.
 
-For a local error on an unconnected IPv4 socket, `Dest` has port 0. Linux reports the socket's connected port there (`net/ipv4/ip_output.c:990` in v7.0); IPv6 reports the datagram's.
+For a local error on an unconnected IPv4 socket, `Dest` has port 0. Linux reports the socket's connected port there (`net/ipv4/ip_output.c:990` in v7.0), so a connected IPv4 socket gets the right port; IPv6 reports the datagram's. The router tests check all three.
 
 `probes/run.sh` checks the same kernel behaviour from C, without Go in the way.
 
@@ -85,5 +85,5 @@ The repo is private, so the public module proxy can't fetch it. Set `GOPRIVATE` 
 
 ```sh
 go env -w GOPRIVATE=github.com/MohibShaikh/*
-go get github.com/MohibShaikh/errqueue@v0.1.1
+go get github.com/MohibShaikh/errqueue@latest
 ```
