@@ -21,6 +21,9 @@ jobs:
       - run: sudo netns/setup.sh
       - run: go test -c -o errqueue.test .
       - run: sudo ERRQUEUE_NETNS=1 ./errqueue.test -test.run Router -test.v -test.count=1
+      # Go's resolver against unreachable DNS servers, timed without and with errqueue.
+      - run: go build -o resolver ./examples/resolver
+      - run: sudo examples/resolver/run.sh ./resolver
       - name: Router state
         if: failure()
         run: |
