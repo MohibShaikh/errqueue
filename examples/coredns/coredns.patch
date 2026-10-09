@@ -1,0 +1,41 @@
+diff --git a/plugin/pkg/proxy/connect.go b/plugin/pkg/proxy/connect.go
+index e4b5714..8cb941d 100644
+--- a/plugin/pkg/proxy/connect.go
++++ b/plugin/pkg/proxy/connect.go
+@@ -19,6 +19,7 @@ import (
+ 	"github.com/coredns/coredns/plugin/pkg/transport"
+ 	"github.com/coredns/coredns/request"
+ 
++	"github.com/MohibShaikh/errqueue"
+ 	"github.com/miekg/dns"
+ )
+ 
+@@ -118,7 +119,7 @@ func (t *Transport) dial(ctx context.Context, proto string, tlsDeadline time.Tim
+ 	}
+ 	reqTime := time.Now()
+ 	timeout := t.dialTimeout()
+-	dialer := &net.Dialer{Timeout: timeout}
++	dialer := &net.Dialer{Timeout: timeout, Control: errqueue.Control}
+ 
+ 	if t.localAddress != nil {
+ 		if proto == "udp" {
+diff --git a/plugin/pkg/proxy/health.go b/plugin/pkg/proxy/health.go
+index 2cc78ed..e850be8 100644
+--- a/plugin/pkg/proxy/health.go
++++ b/plugin/pkg/proxy/health.go
+@@ -13,6 +13,7 @@ import (
+ 	"github.com/coredns/coredns/plugin/pkg/log"
+ 	"github.com/coredns/coredns/plugin/pkg/transport"
+ 
++	"github.com/MohibShaikh/errqueue"
+ 	"github.com/miekg/dns"
+ )
+ 
+@@ -53,6 +54,7 @@ func NewHealthChecker(proxyName, protocol string, recursionDesired bool, domain
+ 	case transport.DNS, transport.TLS:
+ 		c := new(dns.Client)
+ 		c.Net = "udp"
++		c.Dialer = &net.Dialer{Control: errqueue.Control}
+ 		setDefaultTimeout(c)
+ 
+ 		return &dnsHc{

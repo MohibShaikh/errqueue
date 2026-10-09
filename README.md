@@ -65,6 +65,12 @@ func handle(e errqueue.Event) {
 
 `Send` returns nil when the datagram was sent. It returns a `*DrainError` when the datagram was sent but reading the queue failed, so don't send it again. The send function must send one datagram per call.
 
+For sockets a library creates itself, such as a DNS client's, `Control` does what `Enable` does as each socket is created. It fits `net.Dialer.Control` and `net.ListenConfig.Control` and leaves TCP sockets alone:
+
+```go
+d := &net.Dialer{Control: errqueue.Control}
+```
+
 `Enable` sets both `IPV6_RECVERR` and `IP_RECVERR` on IPv6 sockets. A dual-stack socket, which is what `net.ListenUDP("udp", nil)` gives you, queues nothing for its IPv4 traffic without the second one.
 
 On other systems `Enable` and `Drain` return `errors.ErrUnsupported` and `Send` only calls the send function.
@@ -80,6 +86,17 @@ Go's resolver dials a connected UDP socket for each query, and its `Dial` hook c
 | Closed port | 1–2 ms | 1–2 ms |
 
 The IPv4 case stops at 5 s because the router rate-limits ICMP per source. With errqueue the resolver retries at once, so its four queries (A and AAAA, two attempts each) arrive within milliseconds. On 7.0 the router answered three and dropped the fourth (its counters read `IcmpOutDestUnreachs` 3, `IcmpOutRateLimitHost` 1), and that query waited out its timeout. A closed port already fails fast without errqueue, because a connected socket gets `ECONNREFUSED`.
+
+## What it changes for CoreDNS failover
+
+CoreDNS's `forward` plugin also uses connected UDP sockets, for queries and for the health checks that mark an upstream down. `examples/coredns/coredns.patch` sets `Control` on both dialers, four lines against CoreDNS 1.14.7 (commit `ef18404`). `examples/coredns/run.sh` forwards 50 queries/s to two upstreams in order, makes the first one unreachable 4 s in, and counts the queries slower than 500 ms over 12 s. Measured on 7.0.0-38, the same in three runs for IPv4 and two for IPv6:
+
+| | Unpatched | Patched |
+|---|---|---|
+| IPv4: slow queries, of about 600 | 301 | 150 |
+| IPv6: slow queries, of about 600 | 301 | 116 |
+
+Errqueue only helps the queries whose ICMP error arrives, and the router rate-limits those per source. It sent 3 or 4 IPv4 errors in the whole run and rate-limited the rest, and 45 to 68 IPv6 errors. The rest of the delay is the health checker's: it marks an upstream down after three failed checks 500 ms apart (`plugin/forward/forward.go:34,85` and `plugin/pkg/proxy/proxy.go:146` in CoreDNS).
 
 ## What the tests cover
 
