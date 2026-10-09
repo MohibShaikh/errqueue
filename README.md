@@ -69,6 +69,18 @@ func handle(e errqueue.Event) {
 
 On other systems `Enable` and `Drain` return `errors.ErrUnsupported` and `Send` only calls the send function.
 
+## What it changes for Go's resolver
+
+Go's resolver dials a connected UDP socket for each query, and its `Dial` hook can enable errqueue on it (`examples/resolver`). Without `IP_RECVERR`, that socket ignores an ICMP net or host unreachable, so a lookup against a server behind an unreachable route waits out every timeout. `examples/resolver/run.sh` times a `LookupHost` against the router from `netns/setup.sh`, with the resolver's default 5 s timeout and 2 attempts. Measured on Linux 6.17.0-1022-azure (CI, Go 1.26.0) and 7.0.0-38 (Go 1.27.1):
+
+| DNS server | Plain | With errqueue |
+|---|---|---|
+| Behind an IPv6 unreachable route | 10.0 s | under 1 ms |
+| Behind an IPv4 unreachable route | 10.0 s | 5.0 s |
+| Closed port | 1–2 ms | 1–2 ms |
+
+The IPv4 case stops at 5 s because the router rate-limits ICMP per source. With errqueue the resolver retries at once, so its four queries (A and AAAA, two attempts each) arrive within milliseconds. On 7.0 the router answered three and dropped the fourth (its counters read `IcmpOutDestUnreachs` 3, `IcmpOutRateLimitHost` 1), and that query waited out its timeout. A closed port already fails fast without errqueue, because a connected socket gets `ECONNREFUSED`.
+
 ## What the tests cover
 
 The tests run against real sockets on loopback. On Linux 7.0.0-38-generic x86_64 with Go 1.27.1 they cover port unreachable on IPv4, IPv6 and dual-stack sockets, a local `EMSGSIZE` with its MTU, the read and send side effects above, and full versus partial drains. The parser has unit tests and a fuzz target (`go test -fuzz FuzzParse`).
