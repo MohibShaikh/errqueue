@@ -20,7 +20,7 @@ index e4b5714..8cb941d 100644
  	if t.localAddress != nil {
  		if proto == "udp" {
 diff --git a/plugin/pkg/proxy/health.go b/plugin/pkg/proxy/health.go
-index 2cc78ed..e850be8 100644
+index 2cc78ed..5bac116 100644
 --- a/plugin/pkg/proxy/health.go
 +++ b/plugin/pkg/proxy/health.go
 @@ -13,6 +13,7 @@ import (
@@ -31,11 +31,12 @@ index 2cc78ed..e850be8 100644
  	"github.com/miekg/dns"
  )
  
-@@ -53,6 +54,7 @@ func NewHealthChecker(proxyName, protocol string, recursionDesired bool, domain
+@@ -53,6 +54,8 @@ func NewHealthChecker(proxyName, protocol string, recursionDesired bool, domain
  	case transport.DNS, transport.TLS:
  		c := new(dns.Client)
  		c.Net = "udp"
-+		c.Dialer = &net.Dialer{Control: errqueue.Control}
++		// A Dialer replaces dns.Client's own 2s dial timeout, so keep it.
++		c.Dialer = &net.Dialer{Timeout: 2 * time.Second, Control: errqueue.Control}
  		setDefaultTimeout(c)
  
  		return &dnsHc{

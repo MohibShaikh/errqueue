@@ -89,7 +89,7 @@ The IPv4 case stops at 5 s because the router rate-limits ICMP per source. With 
 
 ## What it changes for CoreDNS failover
 
-CoreDNS's `forward` plugin also uses connected UDP sockets, for queries and for the health checks that mark an upstream down. `examples/coredns/coredns.patch` sets `Control` on both dialers, four lines against CoreDNS 1.14.7 (commit `ef18404`). `examples/coredns/run.sh` forwards 50 queries/s to two upstreams in order, makes the first one unreachable 4 s in, and counts the queries slower than 500 ms over 12 s. Measured on 7.0.0-38, the same in three runs for IPv4 and two for IPv6:
+CoreDNS's `forward` plugin also uses connected UDP sockets, for queries and for the health checks that mark an upstream down. `examples/coredns/coredns.patch` sets `Control` on both dialers, five lines against CoreDNS 1.14.7 (commit `ef18404`). `examples/coredns/run.sh` forwards 50 queries/s to two upstreams in order, makes the first one unreachable 4 s in, and counts the queries slower than 500 ms over 12 s. Measured on 7.0.0-38, the same in three runs for IPv4 and two for IPv6:
 
 | | Unpatched | Patched |
 |---|---|---|
@@ -97,6 +97,8 @@ CoreDNS's `forward` plugin also uses connected UDP sockets, for queries and for 
 | IPv6: slow queries, of about 600 | 301 | 116 |
 
 Errqueue only helps the queries whose ICMP error arrives, and the router rate-limits those per source. It sent 3 or 4 IPv4 errors in the whole run and rate-limited the rest, and 45 to 68 IPv6 errors. The rest of the delay is the health checker's: it marks an upstream down after three failed checks 500 ms apart (`plugin/forward/forward.go:34,85` and `plugin/pkg/proxy/proxy.go:146` in CoreDNS).
+
+Fast failures could make things worse when every upstream is down: forward retries its upstreams until 5 s pass (CoreDNS issue #5897). With `all`, `run.sh` makes both upstreams unreachable. Over IPv6, the patched forwarder sent 658 packets upstream in the last 8 s against 1119 unpatched, because its health checks mark the upstreams down sooner. With `NOLIMIT=1`, which turns off the router's ICMP limits so every packet gets an error, it sent 589, and no query took over 500 ms against 399 unpatched.
 
 ## What the tests cover
 
