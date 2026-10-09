@@ -79,11 +79,10 @@ For a local error on an unconnected IPv4 socket, `Dest` has port 0. Linux report
 
 `probes/run.sh` checks the same kernel behaviour from C, without Go in the way.
 
-## Installing from a private repo
-
-The repo is private, so the public module proxy can't fetch it. Set `GOPRIVATE` and make sure git can authenticate to GitHub:
+## Installing
 
 ```sh
-go env -w GOPRIVATE=github.com/MohibShaikh/*
 go get github.com/MohibShaikh/errqueue@latest
 ```
+
+It needs Go 1.26 or later. BSD-3-Clause licensed; see `LICENSE`.
