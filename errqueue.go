@@ -45,15 +45,20 @@ func (o Origin) String() string {
 // Event is one error queue entry: an ICMP error some host or router sent about a
 // datagram this socket sent, or an error the local stack raised for one.
 type Event struct {
-	Err       syscall.Errno  // ECONNREFUSED, EHOSTUNREACH, EMSGSIZE, ...
-	Origin    Origin         // where the error was raised
-	Type      uint8          // ICMP or ICMPv6 type; 0 for a local error
-	Code      uint8          // ICMP or ICMPv6 code; 0 for a local error
-	Info      uint32         // the reported MTU when Err is EMSGSIZE
-	Offender  netip.Addr     // who reported the error; invalid for a local error
-	Dest      netip.AddrPort // where the original datagram was going
-	Payload   []byte         // the start of the original datagram's payload
-	Truncated bool           // the kernel quoted more payload than was read
+	Err      syscall.Errno // ECONNREFUSED, EHOSTUNREACH, EMSGSIZE, ...
+	Origin   Origin        // where the error was raised
+	Type     uint8         // ICMP or ICMPv6 type; 0 for a local error
+	Code     uint8         // ICMP or ICMPv6 code; 0 for a local error
+	Info     uint32        // the reported MTU when Err is EMSGSIZE
+	Offender netip.Addr    // who reported the error; invalid for a local error
+
+	// Dest is where the original datagram was going. Its port is 0 for a local
+	// error on an unconnected IPv4 socket: Linux reports the socket's connected
+	// port there, not the datagram's.
+	Dest netip.AddrPort
+
+	Payload   []byte // the start of the original datagram's payload
+	Truncated bool   // the kernel quoted more payload than was read
 
 	// ControlTruncated reports that the kernel had more control data than fit,
 	// so Offender may be missing.

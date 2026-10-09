@@ -1,0 +1,30 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: uname -r
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race -count=3 ./...
+      - run: probes/run.sh
+      # Router tests: ICMP from a real router in a network namespace (needs root).
+      - run: sudo netns/setup.sh
+      - run: go test -c -o errqueue.test .
+      - run: sudo ERRQUEUE_NETNS=1 ./errqueue.test -test.run Router -test.v -test.count=1
+      - name: Router state
+        if: failure()
+        run: |
+          ip route get 10.0.9.1
+          sudo ip -n eqr route
+          sudo ip netns exec eqr sysctl -a 2>/dev/null | grep -E 'ipv4\.(ip_forward|icmp_|conf\.(all|c1)\.(forwarding|rp_filter))'
+          sudo ip netns exec eqr nstat -az | grep -Ei 'icmp|noroute|addrerr|forw'
