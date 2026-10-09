@@ -95,13 +95,14 @@ func TestRouterPacketTooBig(t *testing.T) {
 		{"ipv6", "udp6", "::", "[fd00:2::2]:9", OriginICMP6, 2, 0, routerV6, 1280 - 40 - 8 - 40 - 8},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := enabled(t, tc.network, tc.ip)
-			control(t, c, func(fd int) error {
+			dontFrag := func(fd int) error {
 				if tc.network == "udp6" {
 					return unix.SetsockoptInt(fd, unix.SOL_IPV6, unix.IPV6_DONTFRAG, 1)
 				}
 				return unix.SetsockoptInt(fd, unix.SOL_IP, unix.IP_MTU_DISCOVER, unix.IP_PMTUDISC_DO)
-			})
+			}
+			c := enabled(t, tc.network, tc.ip)
+			control(t, c, dontFrag)
 			dst := netip.MustParseAddrPort(tc.dst)
 			e := routerEvent(t, c, dst, make([]byte, 1400))
 			mtu, ok := e.MTU()
@@ -118,12 +119,37 @@ func TestRouterPacketTooBig(t *testing.T) {
 				t.Fatalf("after the second send: got %d events, want 1", len(evs))
 			}
 			t.Log(evs[0])
+			want := dst
 			if tc.network == "udp4" {
-				dst = netip.AddrPortFrom(dst.Addr(), 0) // IPv4 reports the connected port, none here
+				want = netip.AddrPortFrom(dst.Addr(), 0) // IPv4 reports the connected port, none here
 			}
 			mtu, ok = evs[0].MTU()
-			if evs[0].Origin != OriginLocal || !ok || mtu != 1300 || evs[0].Offender.IsValid() || evs[0].Dest != dst {
+			if evs[0].Origin != OriginLocal || !ok || mtu != 1300 || evs[0].Offender.IsValid() || evs[0].Dest != want {
 				t.Errorf("local report: got %+v", evs[0])
+			}
+
+			// A connected socket to the same destination gets the cached MTU too, and
+			// its local report carries the port on IPv4 as well.
+			cc, err := net.DialUDP(tc.network, nil, net.UDPAddrFromAddrPort(dst))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cc.Close()
+			if err := Enable(cc); err != nil {
+				t.Fatal(err)
+			}
+			control(t, cc, dontFrag)
+			if _, err := cc.Write(make([]byte, 1400)); !errors.Is(err, syscall.EMSGSIZE) {
+				t.Fatalf("connected oversized send: want EMSGSIZE, got %v", err)
+			}
+			evs = drainAll(t, cc)
+			if len(evs) != 1 {
+				t.Fatalf("connected: got %d events, want 1", len(evs))
+			}
+			t.Log(evs[0])
+			mtu, ok = evs[0].MTU()
+			if evs[0].Origin != OriginLocal || !ok || mtu != 1300 || evs[0].Dest != dst {
+				t.Errorf("connected local report: got %+v", evs[0])
 			}
 		})
 	}

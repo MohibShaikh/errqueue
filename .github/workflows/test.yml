@@ -28,3 +28,31 @@ jobs:
           sudo ip -n eqr route
           sudo ip netns exec eqr sysctl -a 2>/dev/null | grep -E 'ipv4\.(ip_forward|icmp_|conf\.(all|c1)\.(forwarding|rp_filter))'
           sudo ip netns exec eqr nstat -az | grep -Ei 'icmp|noroute|addrerr|forw'
+
+  # Every push to master is a release: a patch bump, or a minor bump when the
+  # pushed commit's message (the PR title, for a merge) contains [minor].
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    concurrency: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          MSG: ${{ github.event.head_commit.message }}
+        run: |
+          if [ -n "$(git tag --points-at HEAD 'v*')" ]; then
+            echo "already tagged"; exit 0
+          fi
+          last=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          IFS=. read -r major minor patch <<< "${last#v}"
+          case "$MSG" in
+            *"[minor]"*) next="v$major.$((minor + 1)).0" ;;
+            *) next="v$major.$minor.$((patch + 1))" ;;
+          esac
+          gh release create "$next" --target "$GITHUB_SHA" --title "$next" --generate-notes
