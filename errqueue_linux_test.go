@@ -164,6 +164,41 @@ func TestPortUnreachable(t *testing.T) {
 
 // Without IP_RECVERR a dual-stack socket queues nothing for IPv4 traffic, which is
 // why Enable sets it on IPv6 sockets too.
+// Control enables the queue on the UDP sockets a Dialer creates and leaves TCP
+// sockets alone.
+func TestControl(t *testing.T) {
+	d := net.Dialer{Control: Control}
+	c, err := d.Dial("udp4", closedAddr(t, "udp4", "127.0.0.1").String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Write([]byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	waitErr(t, c.(*net.UDPConn))
+	if evs := drainAll(t, c.(*net.UDPConn)); len(evs) != 1 || evs[0].Err != syscall.ECONNREFUSED {
+		t.Fatalf("got %v, want one ECONNREFUSED", evs)
+	}
+
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	tc, err := d.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tc.Close()
+	control(t, tc.(*net.TCPConn), func(fd int) error {
+		if v, err := unix.GetsockoptInt(fd, unix.SOL_IP, unix.IP_RECVERR); err != nil || v != 0 {
+			return errors.Join(err, errors.New("IP_RECVERR is set on a TCP socket"))
+		}
+		return nil
+	})
+}
+
 func TestDualStackNeedsIPRecvErr(t *testing.T) {
 	c := listen(t, "udp", "::")
 	control(t, c, func(fd int) error { return unix.SetsockoptInt(fd, unix.SOL_IPV6, unix.IPV6_RECVERR, 1) })

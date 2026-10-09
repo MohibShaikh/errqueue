@@ -8,8 +8,8 @@
 // and send through Send, so these reports are consumed instead of treated as
 // failures. Give each socket one goroutine that drains it.
 //
-// On other systems Enable and Drain return errors.ErrUnsupported and Send only
-// calls the send function.
+// On other systems Enable and Drain return errors.ErrUnsupported, Control does
+// nothing and Send only calls the send function.
 package errqueue
 
 import (

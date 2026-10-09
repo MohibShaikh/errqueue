@@ -48,8 +48,23 @@ func Enable(conn syscall.Conn) error {
 	if err != nil {
 		return err
 	}
+	return enable(rc)
+}
+
+// Control enables the error queue on a UDP socket as it is created, like Enable.
+// It fits net.Dialer.Control and net.ListenConfig.Control, for sockets that a
+// library such as a DNS client creates itself. Other networks are left alone.
+func Control(network, address string, c syscall.RawConn) error {
+	switch network {
+	case "udp", "udp4", "udp6":
+		return enable(c)
+	}
+	return nil
+}
+
+func enable(rc syscall.RawConn) error {
 	var serr error
-	err = rc.Control(func(fd uintptr) {
+	err := rc.Control(func(fd uintptr) {
 		var domain int
 		domain, serr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_DOMAIN)
 		switch {
